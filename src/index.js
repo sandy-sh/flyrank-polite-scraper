@@ -1,5 +1,6 @@
-import { readFile, writeFile, access } from 'node:fs/promises';
+import { readFile, writeFile, access, mkdir } from 'node:fs/promises';
 import * as cheerio from 'cheerio';
+import { z } from 'zod';
 
 const url = 'https://books.toscrape.com/';
 let currentPageUrl = url;
@@ -7,6 +8,18 @@ let cataloguePages = 1;
 
 const bookUrls = [];
 const bookRawData = [];
+
+const bookSchema = z.object({
+    title: z.string(),
+    product_url: z.string().url(),
+    price_text: z.string(),
+    price_gbp: z.number(),
+    availability_text: z.string(),
+    rating_text: z.string(),
+    description: z.string().nullable(),
+    source_page: z.string().url(),
+    fetched_at: z.iso.datetime()
+})
 
 while (cataloguePages <= 3) {
 const cachePath = `../cache/catalogue-page-${cataloguePages}.html`;
@@ -84,8 +97,16 @@ console.log(`catalogue_pages=${cataloguePages}`);
 console.log(`discovered=${bookUrls.length}`);
 console.log(`unique_urls=${new Set(bookUrls.map(book => book.product_url)).size}`);
 
+const uniqueUrls = new Set();
+
 for (let index = 0; index < bookUrls.length; index++) {
     const book = bookUrls[index];
+
+    if (uniqueUrls.has(book.product_url)){
+        continue
+    } 
+
+    uniqueUrls.add(book.product_url);
 
     const bookCachePath = `../cache/book-${index + 1}.html`;
     let bookContent;
@@ -134,10 +155,10 @@ for (let index = 0; index < bookUrls.length; index++) {
     }
 
     const $ = cheerio.load(bookContent);
-    const titleText = $('div.product_main h1')?.text().trim() ?? null;
-    const priceText = $('div.product_main p.price_color')?.text().trim() ?? null;
-    const availabilityText = $('div.product_main p.availability')?.text().trim() ?? null;
-    const ratingText = $('div.product_main p.star-rating')?.attr('class')?.split(' ')[1] ?? null;
+    const titleText = $('div.product_main h1').text().trim();
+    const priceText = $('div.product_main p.price_color').text().trim();
+    const availabilityText = $('div.product_main p.availability').text().trim();
+    const ratingText = $('div.product_main p.star-rating')?.attr('class').split(' ')[1];
     const descriptionText = $('div#product_description + p').text().trim() || null;
     const fetchedAt = new Date().toISOString();
 
@@ -153,5 +174,49 @@ for (let index = 0; index < bookUrls.length; index++) {
     });
 }
 
-console.log(JSON.stringify(bookRawData[0], null, 2));
-console.log(`detail_pages=${bookRawData.length}`);
+function normalizePrice(bookRawData) {
+    const rawData = [];
+
+    for (let i = 0; i < bookRawData.length; i++) {
+        rawData.push({
+            "title": bookRawData[i].title,
+            "product_url": bookRawData[i].product_url,
+            "price_text": bookRawData[i].price_text,
+            "price_gbp": Number(bookRawData[i].price_text.replace('£', '')),
+            "availability_text": bookRawData[i].availability_text,
+            "rating_text": bookRawData[i].rating_text,
+            "description": bookRawData[i].description,
+            "source_page": bookRawData[i].source_page,
+            "fetched_at": bookRawData[i].fetched_at
+        })
+    }
+
+    return rawData;
+}
+
+const normalizedBookData = normalizePrice(bookRawData);
+console.log(JSON.stringify(normalizedBookData[0], null, 2));
+console.log(`detail_pages=${normalizedBookData.length}`);
+
+const validBook = [];
+const invalidBook = [];
+
+for (const book of normalizedBookData) {
+    const result = bookSchema.safeParse(book);
+
+    if (result.success) {
+        validBook.push(result.data);
+    } else {
+        invalidBook.push({
+            "book": book,
+            "errors": result.error.issues
+        });
+    }
+}
+
+console.log(`valid_book=${validBook.length}`);
+console.log(`invalid_book=${invalidBook.length}`);
+
+await mkdir('../output', { recursive: true });
+await writeFile('../output/books.json', JSON.stringify(validBook, null, 2), 'utf8');
+await writeFile('../output/errors.json', JSON.stringify(invalidBook, null, 2), 'utf8');
